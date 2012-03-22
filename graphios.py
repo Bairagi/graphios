@@ -37,7 +37,7 @@ import struct
 ##### You will likely need to change some of the below #####
 
 # carbon server info
-carbon_server = '127.0.0.1'
+carbon_server = '10.10.101.54'
 
 # carbon pickle receiver port (normally 2004)
 carbon_port = 2004
@@ -74,6 +74,7 @@ f = logging.Formatter("%(asctime)s %(filename)s %(levelname)s %(message)s",
 log_handler.setFormatter(f)
 log.addHandler(log_handler)
 
+splitter=re.compile("\s+")
 
 def connect_carbon():
     """
@@ -131,7 +132,10 @@ def convert_pickle(carbon_list):
     """
     pickle_list = []
     for metric in carbon_list:
-        path, value, timestamp = metric.split(" ")
+        if splitter.split(metric).__len__() > 3:
+            log.warn("More than three metrics: ")
+            log.warn(metric)
+        path, value, timestamp = splitter.split(metric)
         metric_tuple = (path, (timestamp, value))
         pickle_list.append(metric_tuple)
 
