@@ -2,6 +2,12 @@
 #
 # Copyright (C) 2011  Shawn Sterling <shawn@systemtemplar.org>
 #
+# With contributions from:
+#
+# Juan Jose Presa <juanjop@gmail.com>
+# Ranjib Dey <dey.ranjib@gmail.com>
+# Ryan Davis <https://github.com/ryepup>
+#
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
 # as published by the Free Software Foundation; either version 2
@@ -32,6 +38,8 @@ import time
 import socket
 import cPickle as pickle
 import struct
+from optparse import OptionParser
+
 
 ############################################################
 ##### You will likely need to change some of the below #####
@@ -64,17 +72,40 @@ test_mode = False
 ##### You should stop changing things unless you know what you are doing #####
 ##############################################################################
 
+parser = OptionParser("""usage: %prog [options]
+sends nagios performance data to carbon.
+""")
+
+parser.add_option('-v', "--verbose", action="store_true", dest="verbose",
+                  help="sets logging to DEBUG level")
+parser.add_option("--spool-directory", dest="spool_directory",
+                  default=spool_directory,
+                  help="where to look for nagios performance data")
+parser.add_option("--log-file", dest="log_file",
+                  default=log_file,
+                  help="file to log to")
+
 sock = socket.socket()
 log = logging.getLogger('log')
-log.setLevel(log_level)
-log_handler = logging.handlers.RotatingFileHandler(log_file,
-    maxBytes=log_max_size, backupCount=4)
-f = logging.Formatter("%(asctime)s %(filename)s %(levelname)s %(message)s",
-    "%B %d %H:%M:%S")
-log_handler.setFormatter(f)
-log.addHandler(log_handler)
 
-splitter=re.compile("\s+")
+
+def configure(opts):
+    global spool_directory
+
+    log_handler = logging.handlers.RotatingFileHandler(
+        opts.log_file, maxBytes=log_max_size, backupCount=4)
+    f = logging.Formatter("%(asctime)s %(filename)s %(levelname)s %(message)s",
+                          "%B %d %H:%M:%S")
+    log_handler.setFormatter(f)
+    log.addHandler(log_handler)
+
+    if opts.verbose:
+        log.setLevel(logging.DEBUG)
+    else:
+        log.setLevel(log_level)
+
+    spool_directory = opts.spool_directory
+
 
 def connect_carbon():
     """
@@ -132,10 +163,7 @@ def convert_pickle(carbon_list):
     """
     pickle_list = []
     for metric in carbon_list:
-        if splitter.split(metric).__len__() > 3:
-            log.warn("More than three metrics: ")
-            log.warn(metric)
-        path, value, timestamp = splitter.split(metric)
+        path, value, timestamp = re.split("\s+",metric.strip())
         metric_tuple = (path, (timestamp, value))
         pickle_list.append(metric_tuple)
 
@@ -175,7 +203,7 @@ rta=1.066ms;5.000;10.000;0; pl=0%;5;10;; rtmax=4.368ms;;;; rtmin=0.196ms;;;;
     try:
         f = open(file_name, "r")
         file_array = f.readlines()
-        f.close
+        f.close()
     except Exception, e:
         log.critical("Can't open file:%s error: %s" % (file_name, e))
         sys.exit(2)
@@ -205,23 +233,14 @@ rta=1.066ms;5.000;10.000;0; pl=0%;5;10;; rtmax=4.368ms;;;; rtmin=0.196ms;;;;
                 value = re.sub("\s", "", value)
                 if str(value) != "$_HOSTGRAPHITEPREFIX$":
                     graphite_prefix = value
-        if graphite_prefix == "" and graphite_postfix == "":
-# uncomment below if you are troubleshooting a weird plugin.
-#            log.debug("can't find graphiteprefix and postfix for %s in %s" % (
-#                line, file_name))
+
+        if host_perf_data == "":
             continue
-        if graphite_prefix != "":
-            carbon_string = "%s." % graphite_prefix
-        if host_name != "":
-            carbon_string = carbon_string + "%s." % host_name
-        else:
-            log.debug("hostname not found for %s in %s" % (line, file_name))
-            continue
-        if graphite_postfix != "":
-            carbon_string = carbon_string + "%s." % graphite_postfix
-        if host_perf_data != "":
-            graphite_lines.extend(process_host_perf_data(carbon_string, \
-                host_perf_data, time))
+        carbon_string = build_carbon_metric(
+            graphite_prefix, host_name, graphite_postfix)
+        if carbon_string:
+            graphite_lines.extend(process_host_perf_data(
+                    carbon_string, host_perf_data, time))
 
     handle_file(file_name, graphite_lines, test_mode, delete_after)
 
@@ -310,7 +329,7 @@ def process_service_data(file_name, delete_after=0):
     try:
         f = open(file_name, "r")
         file_array = f.readlines()
-        f.close
+        f.close()
     except Exception, e:
         log.critical("Can't open file:%s error: %s" % (file_name, e))
         sys.exit(2)
@@ -329,7 +348,7 @@ def process_service_data(file_name, delete_after=0):
                 var_name = var.split('::')[0]
                 if var_name == 'SERVICECHECKCOMMAND':
                     continue
-                (var_name, value) = var.split('::')
+                value = var[len(var_name) + 2:]
             else:
                 var_name = ""
             if var_name == 'TIMET':
@@ -350,24 +369,41 @@ def process_service_data(file_name, delete_after=0):
         if not re.search("=", service_perf_data):
             # no perfdata to parse, so we're done
             continue
-        if graphite_prefix == "" and graphite_postfix == "":
-# uncomment below if you are troubleshooting a weird plugin.
-#            log.debug("can't find graphite prefix or postfix in %s on %s" % (
-#                line, file_name))
-            continue
-        if graphite_prefix is not "":
-            carbon_string = "%s." % graphite_prefix
-        if host_name is not "":
-            carbon_string = carbon_string + "%s." % host_name
-        else:
-            log.debug("can't find hostname in %s on %s" % (line, file_name))
-            continue
-        if graphite_postfix is not "":
-            carbon_string = carbon_string + "%s." % graphite_postfix
-        graphite_lines.extend(process_service_perf_data(carbon_string, \
-            service_perf_data, time))
+
+        carbon_string = build_carbon_metric(
+            graphite_prefix, host_name, graphite_postfix)
+        if carbon_string:
+            graphite_lines.extend(process_service_perf_data(
+                    carbon_string, service_perf_data, time))
 
     handle_file(file_name, graphite_lines, test_mode, delete_after)
+
+
+def build_carbon_metric(graphite_prefix, host_name, graphite_postfix):
+    """
+       builds the metric to send to carbon, returns empty string if
+       there's insufficient data and we shouldn't forward to carbon.
+    """
+
+    if (graphite_prefix == "" and graphite_postfix == ""):
+# uncomment below if you are troubleshooting a weird plugin.
+#       log.debug("can't find graphite prefix or postfix in %s on %s" % (
+#           line, file_name))
+        return ""
+
+    carbon_string = ""
+    if graphite_prefix != "":
+        carbon_string = "%s." % graphite_prefix
+    if host_name != "":
+        carbon_string = carbon_string + "%s." % host_name.replace('.', '_')
+    else:
+        log.debug("can't find hostname in %s on %s" % (line, file_name))
+        return ""
+
+    if graphite_postfix != "":
+        carbon_string = carbon_string + "%s." % graphite_postfix
+
+    return carbon_string
 
 
 def process_perf_string(nagios_perf_string):
@@ -385,10 +421,14 @@ def process_perf_string(nagios_perf_string):
         ignores the UOM.
     """
 #    log.debug("perfstring:%s" % (nagios_perf_string))
+    (name, value) = (None,None)
     tmp = re.findall("=?[^;]*", nagios_perf_string)
-    (name, value) = tmp[0].split('=')
-    value = re.sub('[a-zA-Z]', '', value)
-    value = re.sub('\%', '', value)
+    try:
+        (name, value) = tmp[0].split('=')
+        value = re.sub('[a-zA-Z]', '', value)
+        value = re.sub('\%', '', value)
+    except ValueError:
+        log.error('Bad perf string %s',(nagios_perf_string))
     return name, value
 
 
@@ -403,7 +443,7 @@ def process_service_perf_data(carbon_string, perf_data, time):
     d = dict.fromkeys(perf_data, 0)
     for c in perf_data:
         d[c] += 1
-    if d['='] is 1:
+    if d['='] == 1:
         (name, value) = process_perf_string(perf_data)
         new_line = "%s%s %s %s" % (carbon_string, name, value, time)
         log.debug("new line = %s" % (new_line))
@@ -450,4 +490,6 @@ def main():
 
 
 if __name__ == '__main__':
+    (options, args) = parser.parse_args()
+    configure(options)
     main()
